@@ -118,14 +118,9 @@ async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Re
         bail!("no .txt, .md, or .pdf files found at {}", path.display());
     }
 
-    let mut texts = Vec::new();
-    let mut sources = Vec::new();
-    for file in &files {
-        let content = read_file_text(file)?;
-        for chunk in chunk_text(&content, CHUNK_SIZE, CHUNK_OVERLAP) {
-            sources.push(file.display().to_string());
-            texts.push(chunk);
-        }
+    let (texts, sources, skipped) = read_all_texts(&files);
+    if texts.is_empty() {
+        bail!("no text could be extracted from any file at {}", path.display());
     }
 
     let embeddings: Option<Vec<Vec<f32>>> = match provider {
@@ -156,14 +151,38 @@ async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Re
     }
     save_index(&index, Path::new(INDEX_FILE))?;
     println!(
-        "chunked {} file(s) into {} chunks (embeddings: {}); index now has {} chunk(s) -> {}",
-        files.len(),
+        "chunked {} file(s) into {} chunks (embeddings: {}); index now has {} chunk(s) -> {}{}",
+        files.len() - skipped,
         added,
         if embeddings.is_some() { provider.as_str() } else { "none, TF-IDF at query time" },
         index.chunks.len(),
-        INDEX_FILE
+        INDEX_FILE,
+        if skipped > 0 { format!("; skipped {skipped} file(s), see warnings above") } else { String::new() }
     );
     Ok(())
+}
+
+/// Reads and chunks every file, skipping (with a warning on stderr) any file
+/// whose text can't be extracted instead of aborting the whole ingest.
+fn read_all_texts(files: &[PathBuf]) -> (Vec<String>, Vec<String>, usize) {
+    let mut texts = Vec::new();
+    let mut sources = Vec::new();
+    let mut skipped = 0;
+    for file in files {
+        match read_file_text(file) {
+            Ok(content) => {
+                for chunk in chunk_text(&content, CHUNK_SIZE, CHUNK_OVERLAP) {
+                    sources.push(file.display().to_string());
+                    texts.push(chunk);
+                }
+            }
+            Err(err) => {
+                eprintln!("skipping {}: {err:#}", file.display());
+                skipped += 1;
+            }
+        }
+    }
+    (texts, sources, skipped)
 }
 
 fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
@@ -1133,6 +1152,37 @@ mod tests {
     fn read_file_text_missing_file_errs() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_file_text(&dir.path().join("nope.txt")).is_err());
+    }
+
+    // ---------- read_all_texts ----------
+
+    #[test]
+    fn read_all_texts_skips_bad_files_instead_of_aborting() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.txt");
+        let bad = dir.path().join("scanned.pdf");
+        fs::write(&good, "this one reads fine.").unwrap();
+        fs::write(&bad, b"not a real pdf, so extraction should fail").unwrap();
+
+        let (texts, sources, skipped) = read_all_texts(&[good.clone(), bad]);
+
+        assert_eq!(skipped, 1);
+        assert_eq!(texts, vec!["this one reads fine.".to_string()]);
+        assert_eq!(sources, vec![good.display().to_string()]);
+    }
+
+    #[test]
+    fn read_all_texts_all_good_reports_zero_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        fs::write(&a, "one.").unwrap();
+        fs::write(&b, "two.").unwrap();
+
+        let (texts, _, skipped) = read_all_texts(&[a, b]);
+
+        assert_eq!(skipped, 0);
+        assert_eq!(texts.len(), 2);
     }
 
     // ---------- index persistence ----------

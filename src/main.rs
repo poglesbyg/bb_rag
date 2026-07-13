@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MODEL: &str = "claude-sonnet-5";
-const INDEX_FILE: &str = "index.json";
+const INDEX_FILE: &str = "index.bin";
 const CHUNK_SIZE: usize = 800;
 const CHUNK_OVERLAP: usize = 100;
 const TOP_K: usize = 4;
@@ -774,12 +774,12 @@ async fn hf_generate(client: &reqwest::Client, question: &str, context: &str) ->
 // ---------- index persistence ----------
 
 fn load_index(path: &Path) -> Result<Index> {
-    let data = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&data)?)
+    let data = fs::read(path)?;
+    Ok(bincode::deserialize(&data)?)
 }
 
 fn save_index(index: &Index, path: &Path) -> Result<()> {
-    let data = serde_json::to_string(index)?;
+    let data = bincode::serialize(index)?;
     fs::write(path, data)?;
     Ok(())
 }
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn save_and_load_index_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("index.json");
+        let path = dir.path().join("index.bin");
 
         let mut index = Index::default();
         index.embedding_provider = Some("ollama".to_string());
@@ -1086,6 +1086,6 @@ mod tests {
     #[test]
     fn load_index_missing_file_errs() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load_index(&dir.path().join("nope.json")).is_err());
+        assert!(load_index(&dir.path().join("nope.bin")).is_err());
     }
 }

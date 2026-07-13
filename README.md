@@ -21,7 +21,7 @@ cargo install --path .
 Puts a `bb_rag` binary on your `PATH` (via `~/.cargo/bin`), so every command
 below can drop the `cargo run --` prefix — just `bb_rag ingest docs/`,
 `bb_rag chat --provider ollama`, etc. Run it from whatever directory holds
-the `docs/`, `.env`, and `index.json` you want it to use (it reads/writes
+the `docs/`, `.env`, and `index.bin` you want it to use (it reads/writes
 relative to your current directory, same as `cargo run` does). Re-run
 `cargo install --path .` after pulling changes to update the installed copy.
 
@@ -79,12 +79,12 @@ when you exit (`exit`/`quit`/Ctrl-D). `query` and `ingest` still work with
 any provider; `chat` currently requires `--provider ollama` since streaming
 and multi-turn history aren't wired up for claude/huggingface yet.
 
-Ingesting builds/appends to `index.json` in the working directory. Querying
+Ingesting builds/appends to `index.bin` in the working directory. Querying
 picks its retrieval strategy from what's stored there: if chunks have
 embeddings, it re-embeds the question with the same provider and ranks by
 cosine similarity; otherwise it falls back to in-process TF-IDF. You can't
 mix two different real-embedding providers in one index (e.g. `ollama` then
-`huggingface`) — delete `index.json` and re-ingest to switch.
+`huggingface`) — delete `index.bin` and re-ingest to switch.
 
 Model names are configurable via env vars, defaulting to:
 
@@ -111,3 +111,8 @@ if the default 404s, pick another model from the HF Hub and override
   whichever provider you pick. `chat` streams the response from Ollama's
   `/api/chat` (NDJSON chunks printed as they arrive) and replays the growing
   message history on every turn so the model has multi-turn context.
+- **Storage**: `index.bin` is [bincode](https://docs.rs/bincode)-encoded, not
+  JSON — smaller and faster to (de)serialize than text, especially for the
+  embedding vectors, at the cost of not being human-readable. It's not a
+  format you should expect to stay compatible across bb_rag versions; if
+  loading ever fails after an update, delete it and re-ingest.

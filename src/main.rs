@@ -124,7 +124,7 @@ async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Re
         Provider::Ollama | Provider::HuggingFace => Some(embed_texts(client, provider, &texts).await?),
     };
 
-    let mut index = load_index().unwrap_or_default();
+    let mut index = load_index(Path::new(INDEX_FILE)).unwrap_or_default();
     if let Some(existing) = &index.embedding_provider {
         if embeddings.is_some() && existing != provider.as_str() {
             bail!(
@@ -145,7 +145,7 @@ async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Re
         let embedding = embeddings.as_ref().map(|v| v[i].clone());
         index.chunks.push(Chunk { source, text, embedding });
     }
-    save_index(&index)?;
+    save_index(&index, Path::new(INDEX_FILE))?;
     println!(
         "chunked {} file(s) into {} chunks (embeddings: {}); index now has {} chunk(s) -> {}",
         files.len(),
@@ -274,7 +274,7 @@ fn dense_cosine(a: &[f32], b: &[f32]) -> f32 {
 // ---------- query ----------
 
 async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> Result<()> {
-    let index = load_index().context("no index found; run `bb_rag ingest` first")?;
+    let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
     if index.chunks.is_empty() {
         bail!("index is empty; run `bb_rag ingest` first");
     }
@@ -538,13 +538,237 @@ async fn hf_generate(client: &reqwest::Client, question: &str, context: &str) ->
 
 // ---------- index persistence ----------
 
-fn load_index() -> Result<Index> {
-    let data = fs::read_to_string(INDEX_FILE)?;
+fn load_index(path: &Path) -> Result<Index> {
+    let data = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&data)?)
 }
 
-fn save_index(index: &Index) -> Result<()> {
+fn save_index(index: &Index, path: &Path) -> Result<()> {
     let data = serde_json::to_string(index)?;
-    fs::write(INDEX_FILE, data)?;
+    fs::write(path, data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- chunk_text ----------
+
+    #[test]
+    fn chunk_text_empty_input() {
+        assert_eq!(chunk_text("", 10, 2), Vec::<String>::new());
+    }
+
+    #[test]
+    fn chunk_text_shorter_than_size_is_one_chunk() {
+        assert_eq!(chunk_text("  hello world  ", 100, 10), vec!["hello world"]);
+    }
+
+    #[test]
+    fn chunk_text_splits_with_overlap() {
+        let text = "0123456789abcdefghij"; // 20 chars
+        let chunks = chunk_text(text, 10, 3);
+        assert_eq!(chunks, vec!["0123456789", "789abcdefg", "efghij"]);
+    }
+
+    #[test]
+    fn chunk_text_drops_whitespace_only_pieces() {
+        let chunks = chunk_text("a   ", 1, 0);
+        assert!(chunks.iter().all(|c| !c.trim().is_empty()));
+    }
+
+    // ---------- tokenize ----------
+
+    #[test]
+    fn tokenize_lowercases_and_splits_punctuation() {
+        assert_eq!(tokenize("Hello, World!"), vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn tokenize_drops_single_char_tokens() {
+        assert_eq!(tokenize("a bb c dd"), vec!["bb", "dd"]);
+    }
+
+    // ---------- term_freq / idf / tfidf ----------
+
+    #[test]
+    fn term_freq_normalizes_by_length() {
+        let tf = term_freq(&["a".into(), "a".into(), "b".into(), "b".into()]);
+        assert_eq!(tf.get("a").copied(), Some(0.5));
+        assert_eq!(tf.get("b").copied(), Some(0.5));
+    }
+
+    #[test]
+    fn compute_idf_rare_term_scores_higher_than_common_term() {
+        let docs = vec![
+            vec!["common".to_string(), "rare".to_string()],
+            vec!["common".to_string()],
+            vec!["common".to_string()],
+        ];
+        let idf = compute_idf(&docs);
+        assert!(idf["rare"] > idf["common"]);
+    }
+
+    #[test]
+    fn tfidf_vector_combines_tf_and_idf() {
+        let mut idf = HashMap::new();
+        idf.insert("x".to_string(), 2.0);
+        let v = tfidf_vector(&["x".to_string()], &idf);
+        assert_eq!(v.get("x").copied(), Some(2.0));
+    }
+
+    // ---------- cosine similarity ----------
+
+    #[test]
+    fn sparse_cosine_identical_vectors_is_one() {
+        let mut a = HashMap::new();
+        a.insert("x".to_string(), 1.0);
+        a.insert("y".to_string(), 2.0);
+        assert!((sparse_cosine(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparse_cosine_disjoint_keys_is_zero() {
+        let mut a = HashMap::new();
+        a.insert("x".to_string(), 1.0);
+        let mut b = HashMap::new();
+        b.insert("y".to_string(), 1.0);
+        assert_eq!(sparse_cosine(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn sparse_cosine_empty_is_zero() {
+        assert_eq!(sparse_cosine(&HashMap::new(), &HashMap::new()), 0.0);
+    }
+
+    #[test]
+    fn dense_cosine_identical_vectors_is_one() {
+        let a = vec![1.0, 2.0, 3.0];
+        assert!((dense_cosine(&a, &a) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dense_cosine_orthogonal_vectors_is_zero() {
+        assert_eq!(dense_cosine(&[1.0, 0.0], &[0.0, 1.0]), 0.0);
+    }
+
+    #[test]
+    fn dense_cosine_zero_vector_is_zero() {
+        assert_eq!(dense_cosine(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+    }
+
+    // ---------- extract_flag ----------
+
+    #[test]
+    fn extract_flag_removes_flag_and_value() {
+        let mut args = vec!["query".to_string(), "--provider".to_string(), "ollama".to_string(), "hi".to_string()];
+        let value = extract_flag(&mut args, "--provider");
+        assert_eq!(value.as_deref(), Some("ollama"));
+        assert_eq!(args, vec!["query".to_string(), "hi".to_string()]);
+    }
+
+    #[test]
+    fn extract_flag_missing_returns_none() {
+        let mut args = vec!["query".to_string(), "hi".to_string()];
+        let original = args.clone();
+        assert_eq!(extract_flag(&mut args, "--provider"), None);
+        assert_eq!(args, original);
+    }
+
+    #[test]
+    fn extract_flag_at_end_with_no_value_returns_none() {
+        let mut args = vec!["query".to_string(), "--provider".to_string()];
+        let original = args.clone();
+        assert_eq!(extract_flag(&mut args, "--provider"), None);
+        assert_eq!(args, original);
+    }
+
+    // ---------- Provider ----------
+
+    #[test]
+    fn provider_parse_known_names() {
+        assert!(Provider::parse("claude").unwrap() == Provider::Claude);
+        assert!(Provider::parse("ollama").unwrap() == Provider::Ollama);
+        assert!(Provider::parse("huggingface").unwrap() == Provider::HuggingFace);
+        assert!(Provider::parse("hf").unwrap() == Provider::HuggingFace);
+    }
+
+    #[test]
+    fn provider_parse_unknown_name_errs() {
+        assert!(Provider::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn provider_as_str_round_trips_through_parse() {
+        for p in [Provider::Claude, Provider::Ollama, Provider::HuggingFace] {
+            assert!(Provider::parse(p.as_str()).unwrap() == p);
+        }
+    }
+
+    // ---------- collect_files ----------
+
+    #[test]
+    fn collect_files_filters_extensions_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "a").unwrap();
+        fs::write(dir.path().join("b.md"), "b").unwrap();
+        fs::write(dir.path().join("c.png"), "not text").unwrap();
+        let nested = dir.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("d.txt"), "d").unwrap();
+
+        let mut files = collect_files(dir.path()).unwrap();
+        files.sort();
+
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.md", "d.txt"]);
+    }
+
+    #[test]
+    fn collect_files_single_file_with_unsupported_extension_is_filtered_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.json");
+        fs::write(&file, "{}").unwrap();
+        assert_eq!(collect_files(&file).unwrap(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn collect_files_missing_path_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(collect_files(&dir.path().join("does-not-exist")).is_err());
+    }
+
+    // ---------- index persistence ----------
+
+    #[test]
+    fn save_and_load_index_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+
+        let mut index = Index::default();
+        index.embedding_provider = Some("ollama".to_string());
+        index.chunks.push(Chunk {
+            source: "doc.txt".to_string(),
+            text: "hello".to_string(),
+            embedding: Some(vec![0.1, 0.2, 0.3]),
+        });
+
+        save_index(&index, &path).unwrap();
+        let loaded = load_index(&path).unwrap();
+
+        assert_eq!(loaded.embedding_provider.as_deref(), Some("ollama"));
+        assert_eq!(loaded.chunks.len(), 1);
+        assert_eq!(loaded.chunks[0].source, "doc.txt");
+        assert_eq!(loaded.chunks[0].embedding, Some(vec![0.1, 0.2, 0.3]));
+    }
+
+    #[test]
+    fn load_index_missing_file_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_index(&dir.path().join("nope.json")).is_err());
+    }
 }

@@ -14,17 +14,25 @@ Three providers, chosen per-command with `--provider`:
 
 ## Setup
 
-```
-# Claude (default)
-export ANTHROPIC_API_KEY=sk-ant-...
+Copy `.env.example` to `.env` and fill in what you need — it's loaded
+automatically at startup, so no manual `export`ing:
 
-# Ollama — install from ollama.com, then:
+```
+cp .env.example .env
+```
+
+```
+# .env
+ANTHROPIC_API_KEY=sk-ant-...   # claude (default)
+HF_API_TOKEN=hf_...            # huggingface
+```
+
+For Ollama there's no token, just a local server:
+
+```
 ollama pull nomic-embed-text   # embedding model
 ollama pull llama3.2           # generation model
 ollama serve                   # if not already running
-
-# Hugging Face
-export HF_API_TOKEN=hf_...
 ```
 
 `ingest` only hits the network for `ollama`/`huggingface` (to compute

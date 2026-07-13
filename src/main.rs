@@ -57,6 +57,8 @@ struct Index {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
+
     let mut args: Vec<String> = env::args().skip(1).collect();
     let provider_flag = extract_flag(&mut args, "--provider");
     let provider = Provider::parse(provider_flag.as_deref().unwrap_or("claude"))?;

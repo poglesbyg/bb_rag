@@ -1,10 +1,11 @@
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
+use quick_xml::events::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MODEL: &str = "claude-sonnet-5";
@@ -115,7 +116,7 @@ fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
 async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Result<()> {
     let files = collect_files(path)?;
     if files.is_empty() {
-        bail!("no .txt, .md, or .pdf files found at {}", path.display());
+        bail!("no files found at {}", path.display());
     }
 
     let (texts, sources, skipped) = read_all_texts(&files);
@@ -185,6 +186,11 @@ fn read_all_texts(files: &[PathBuf]) -> (Vec<String>, Vec<String>, usize) {
     (texts, sources, skipped)
 }
 
+/// Any file is a candidate — there's no extension allowlist. read_file_text
+/// handles .pdf/.docx specially and treats everything else as a flat text
+/// file; read_all_texts skips (rather than aborts on) whatever isn't valid
+/// UTF-8, so pointing this at a directory with a mix of binary junk in it is
+/// safe, just noisy.
 fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     if path.is_file() {
@@ -194,21 +200,48 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
     } else {
         bail!("path not found: {}", path.display());
     }
-    out.retain(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("txt") | Some("md") | Some("pdf")));
     Ok(out)
 }
 
 fn read_file_text(path: &Path) -> Result<String> {
-    if path.extension().and_then(|e| e.to_str()) == Some("pdf") {
-        pdf_extract::extract_text(path).with_context(|| {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("pdf") => pdf_extract::extract_text(path).with_context(|| {
             format!(
                 "extracting text from {}; scanned/image-only PDFs have no text layer to extract",
                 path.display()
             )
-        })
-    } else {
-        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+        }),
+        Some("docx") => extract_docx_text(path)
+            .with_context(|| format!("extracting text from {}", path.display())),
+        _ => fs::read_to_string(path).with_context(|| format!("reading {}", path.display())),
     }
+}
+
+/// Pulls plain text out of a .docx (a zip archive with an OOXML document
+/// inside): reads word/document.xml and concatenates every <w:t> run,
+/// inserting a newline at each </w:p> paragraph boundary.
+fn extract_docx_text(path: &Path) -> Result<String> {
+    let file = fs::File::open(path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    let mut xml = String::new();
+    archive.by_name("word/document.xml")?.read_to_string(&mut xml)?;
+
+    let mut reader = quick_xml::Reader::from_str(&xml);
+    let mut text = String::new();
+    let mut in_run_text = false;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if e.local_name().as_ref() == b"t" => in_run_text = true,
+            Event::End(e) if e.local_name().as_ref() == b"t" => in_run_text = false,
+            Event::Text(e) if in_run_text => text.push_str(&quick_xml::escape::unescape(&e.decode()?)?),
+            Event::End(e) if e.local_name().as_ref() == b"p" => text.push('\n'),
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(text)
 }
 
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -857,6 +890,28 @@ mod tests {
         out
     }
 
+    /// Builds a minimal .docx (a zip archive containing just
+    /// word/document.xml, which is all extract_docx_text reads) with two
+    /// paragraphs, to check both text extraction and paragraph breaks.
+    fn build_minimal_docx() -> Vec<u8> {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>
+<w:p><w:r><w:t>Hello docx world</w:t></w:r></w:p>
+<w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p>
+</w:body>
+</w:document>"#;
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(io::Cursor::new(&mut buf));
+            writer.start_file("word/document.xml", zip::write::SimpleFileOptions::default()).unwrap();
+            writer.write_all(xml.as_bytes()).unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
     // ---------- chunk_text ----------
 
     #[test]
@@ -1095,12 +1150,13 @@ mod tests {
     // ---------- collect_files ----------
 
     #[test]
-    fn collect_files_filters_extensions_recursively() {
+    fn collect_files_returns_every_file_recursively_regardless_of_extension() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "a").unwrap();
         fs::write(dir.path().join("b.md"), "b").unwrap();
-        fs::write(dir.path().join("c.png"), "not text").unwrap();
-        fs::write(dir.path().join("e.pdf"), b"not a real pdf, just checking the extension filter").unwrap();
+        fs::write(dir.path().join("c.csv"), "not text").unwrap();
+        fs::write(dir.path().join("no_extension"), "flat file with no extension").unwrap();
+        fs::write(dir.path().join("e.pdf"), b"not a real pdf, just checking collection").unwrap();
         let nested = dir.path().join("nested");
         fs::create_dir(&nested).unwrap();
         fs::write(nested.join("d.txt"), "d").unwrap();
@@ -1112,15 +1168,15 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
         names.sort();
-        assert_eq!(names, vec!["a.txt", "b.md", "d.txt", "e.pdf"]);
+        assert_eq!(names, vec!["a.txt", "b.md", "c.csv", "d.txt", "e.pdf", "no_extension"]);
     }
 
     #[test]
-    fn collect_files_single_file_with_unsupported_extension_is_filtered_out() {
+    fn collect_files_single_file_of_any_extension_is_included() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("notes.json");
         fs::write(&file, "{}").unwrap();
-        assert_eq!(collect_files(&file).unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(collect_files(&file).unwrap(), vec![file]);
     }
 
     #[test]
@@ -1146,6 +1202,20 @@ mod tests {
         fs::write(&file, build_minimal_pdf()).unwrap();
         let text = read_file_text(&file).unwrap();
         assert!(text.contains("Hello PDF world"), "got: {text:?}");
+    }
+
+    #[test]
+    fn read_file_text_extracts_docx_text_across_paragraphs() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.docx");
+        fs::write(&file, build_minimal_docx()).unwrap();
+        let text = read_file_text(&file).unwrap();
+        assert!(text.contains("Hello docx world"), "got: {text:?}");
+        assert!(text.contains("Second paragraph"), "got: {text:?}");
+        // paragraphs must not get smashed into one line
+        let hello_pos = text.find("Hello docx world").unwrap();
+        let second_pos = text.find("Second paragraph").unwrap();
+        assert!(text[hello_pos..second_pos].contains('\n'));
     }
 
     #[test]

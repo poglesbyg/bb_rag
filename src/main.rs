@@ -1,3 +1,22 @@
+//! bb_rag: a bare-bones retrieval-augmented generation CLI.
+//!
+//! Three commands, wired together in [`main`]:
+//! - `ingest <path>` — chunk files under `path` ([`chunk_text`]) and, unless
+//!   the provider is `claude`, embed each chunk ([`embed_texts`]). Chunks
+//!   (text + source path + optional embedding) are appended to
+//!   [`Index`] and persisted to [`INDEX_FILE`] via [`save_index`].
+//! - `query <question>` — [`retrieve`] the top matching chunks (dense cosine
+//!   similarity if the index has embeddings, otherwise in-process TF-IDF),
+//!   then make one buffered [`generate`] call to answer from that context.
+//! - `chat` — like `query`, but a REPL ([`chat_repl`]) that streams the
+//!   answer and keeps conversation history across turns. Ollama-only for now.
+//!
+//! Every provider (`claude`/`ollama`/`huggingface`, see [`Provider`]) plugs
+//! into `embed_texts`/`generate` the same way, so adding a fourth provider
+//! means adding one more match arm plus its own HTTP-calling functions —
+//! see the `Anthropic`, `Ollama`, and `Hugging Face` sections below for the
+//! existing three.
+
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use quick_xml::events::Event;
@@ -16,14 +35,21 @@ const TOP_K: usize = 4;
 const SYSTEM_PROMPT: &str = "Answer the user's question using only the provided context. \
     If the context doesn't contain the answer, say you don't know.";
 
+/// Which backend handles embeddings and/or generation for a given command.
+/// Selected per-invocation via `--provider` (default `claude`).
 #[derive(Clone, Copy, PartialEq)]
 enum Provider {
+    /// No embeddings API — [`retrieve`] always falls back to TF-IDF for
+    /// this provider. Generation via the Anthropic Messages API.
     Claude,
+    /// Real embeddings and generation, both against a local Ollama server.
     Ollama,
+    /// Real embeddings and generation, both against the HF Inference API.
     HuggingFace,
 }
 
 impl Provider {
+    /// Parses a `--provider` value. `"hf"` is accepted as a `huggingface` alias.
     fn parse(s: &str) -> Result<Self> {
         match s {
             "claude" => Ok(Self::Claude),
@@ -33,6 +59,9 @@ impl Provider {
         }
     }
 
+    /// Canonical name, also used as the value stored in
+    /// [`Index::embedding_provider`] so a saved index remembers which
+    /// provider's embedding space its vectors live in.
     fn as_str(&self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -42,22 +71,35 @@ impl Provider {
     }
 }
 
+/// One chunk of ingested text.
 #[derive(Serialize, Deserialize, Clone)]
 struct Chunk {
+    /// Display path of the file this chunk came from.
     source: String,
     text: String,
+    /// `None` when ingested with `--provider claude` (no embeddings API) or
+    /// when this specific ingest run predates embeddings being computed.
+    /// [`retrieve`] only does dense cosine ranking over chunks that have one.
     #[serde(default)]
     embedding: Option<Vec<f32>>,
 }
 
+/// The whole on-disk index (bincode-encoded at [`INDEX_FILE`]).
 #[derive(Serialize, Deserialize, Default)]
 struct Index {
+    /// `Some(provider.as_str())` once any chunk in the index carries a real
+    /// embedding; `None` means "TF-IDF only", computed fresh at query time.
+    /// A saved index can only hold embeddings from one real-embedding
+    /// provider at a time — see the bail in [`ingest`].
     #[serde(default)]
     embedding_provider: Option<String>,
     #[serde(default)]
     chunks: Vec<Chunk>,
 }
 
+/// Parses `--provider <value>` and the subcommand, then dispatches to
+/// `ingest`/`query`/`chat_repl`. Prints usage and returns `Ok(())` for
+/// anything else (no subcommand, unknown subcommand).
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
@@ -102,6 +144,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Removes `flag` and the value right after it from `args` (wherever they
+/// appear, not just at the front) and returns that value. `None` if the
+/// flag isn't present, or if it's the last element with no value after it —
+/// in the latter case `args` is left untouched.
 fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let pos = args.iter().position(|a| a == flag)?;
     if pos + 1 >= args.len() {
@@ -113,6 +159,12 @@ fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
 
 // ---------- ingest ----------
 
+/// Chunks and (for ollama/huggingface) embeds every file under `path`,
+/// appending the result to the existing index at [`INDEX_FILE`] (or
+/// starting a fresh one). Bails if `path` has no files, if every file
+/// failed to yield text (see [`read_all_texts`]), or if `provider` computes
+/// embeddings but conflicts with a different provider already recorded in
+/// the index (see [`Index::embedding_provider`]).
 async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Result<()> {
     let files = collect_files(path)?;
     if files.is_empty() {
@@ -203,6 +255,10 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Reads one file into plain text, dispatching on extension: `.pdf` via
+/// [`pdf_extract`], `.docx` via [`extract_docx_text`], anything else as raw
+/// UTF-8. This is the single "make any file into text" entry point — every
+/// new input format should be added here.
 fn read_file_text(path: &Path) -> Result<String> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("pdf") => pdf_extract::extract_text(path).with_context(|| {
@@ -244,6 +300,8 @@ fn extract_docx_text(path: &Path) -> Result<String> {
     Ok(text)
 }
 
+/// Recursively appends every regular file under `dir` to `out` (no
+/// filtering — [`collect_files`] doesn't restrict by extension).
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -257,6 +315,10 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Splits on `.`/`!`/`?` followed by whitespace or end-of-string, keeping
+/// the punctuation on the sentence it ends. Deliberately naive — doesn't
+/// special-case abbreviations ("Mr.") or decimals ("3.14") — a slightly
+/// wrong sentence boundary there is harmless for chunking purposes.
 fn split_sentences(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut sentences = Vec::new();
@@ -325,6 +387,11 @@ fn hard_split(text: &str, size: usize, overlap: usize) -> Vec<String> {
     chunks
 }
 
+/// Splits `text` into chunks of at most `size` chars by greedily packing
+/// whole sentences ([`split_sentences`]), carrying up to `overlap` chars of
+/// trailing context into the next chunk ([`take_overlap`]). A "sentence"
+/// bigger than `size` on its own (no punctuation to split on) falls back to
+/// [`hard_split`] instead of being dropped or left oversized.
 fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
     let sentences = split_sentences(text);
     if sentences.is_empty() {
@@ -368,6 +435,8 @@ fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
 
 // ---------- TF-IDF retrieval (fallback when the index has no embeddings) ----------
 
+/// Lowercases and splits on non-alphanumeric boundaries, dropping
+/// single-char tokens (mostly punctuation-adjacent noise).
 fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -376,6 +445,8 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Raw term frequency, normalized by document length (so a term's weight
+/// doesn't just track how long the chunk happens to be).
 fn term_freq(tokens: &[String]) -> HashMap<String, f32> {
     let mut counts: HashMap<String, u32> = HashMap::new();
     for t in tokens {
@@ -385,6 +456,9 @@ fn term_freq(tokens: &[String]) -> HashMap<String, f32> {
     counts.into_iter().map(|(k, v)| (k, v as f32 / total)).collect()
 }
 
+/// Smoothed inverse document frequency: `ln(N / (1 + df)) + 1` for each
+/// term across `doc_tokens`, so a term appearing in every chunk trends
+/// toward a small positive weight instead of zero/negative.
 fn compute_idf(doc_tokens: &[Vec<String>]) -> HashMap<String, f32> {
     let n = doc_tokens.len() as f32;
     let mut df: HashMap<String, u32> = HashMap::new();
@@ -399,6 +473,8 @@ fn compute_idf(doc_tokens: &[Vec<String>]) -> HashMap<String, f32> {
         .collect()
 }
 
+/// `term_freq(tokens) * idf`, per term — a sparse TF-IDF vector represented
+/// as a term-to-weight map (only non-zero terms are stored).
 fn tfidf_vector(tokens: &[String], idf: &HashMap<String, f32>) -> HashMap<String, f32> {
     term_freq(tokens)
         .into_iter()
@@ -409,6 +485,9 @@ fn tfidf_vector(tokens: &[String], idf: &HashMap<String, f32>) -> HashMap<String
         .collect()
 }
 
+/// Cosine similarity between two sparse (map-represented) vectors. `0.0` if
+/// either is the zero vector, so it's always safe to call even on an empty
+/// document.
 fn sparse_cosine(a: &HashMap<String, f32>, b: &HashMap<String, f32>) -> f32 {
     let (small, big) = if a.len() < b.len() { (a, b) } else { (b, a) };
     let dot: f32 = small.iter().map(|(k, v)| v * big.get(k).copied().unwrap_or(0.0)).sum();
@@ -421,6 +500,8 @@ fn sparse_cosine(a: &HashMap<String, f32>, b: &HashMap<String, f32>) -> f32 {
     }
 }
 
+/// Cosine similarity between two dense embedding vectors (same convention
+/// as [`sparse_cosine`]: `0.0` for a zero vector rather than a division panic).
 fn dense_cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -434,6 +515,13 @@ fn dense_cosine(a: &[f32], b: &[f32]) -> f32 {
 
 // ---------- retrieval (shared by query and chat) ----------
 
+/// Returns the top [`TOP_K`] chunks for `question`, ranked by cosine
+/// similarity, highest first. Picks dense (embedding) or TF-IDF ranking
+/// based on [`Index::embedding_provider`] — the caller doesn't need to know
+/// which was used. For the dense path this makes one `embed_texts` call to
+/// embed the question itself (with the same provider the index was built
+/// with, not necessarily `provider` passed to the overall command, since
+/// that only controls generation).
 async fn retrieve<'a>(client: &reqwest::Client, index: &'a Index, question: &str) -> Result<Vec<(f32, &'a Chunk)>> {
     let top = match &index.embedding_provider {
         Some(embed_provider_str) => {
@@ -471,6 +559,9 @@ async fn retrieve<'a>(client: &reqwest::Client, index: &'a Index, question: &str
     Ok(top)
 }
 
+/// Prints the retrieved chunks' scores and source paths — always called
+/// before generating, in both `query` and `chat`, per the "always show
+/// sources" design (no attempt at inline citation markers).
 fn print_sources(top: &[(f32, &Chunk)]) {
     println!("--- sources ---");
     for (score, chunk) in top {
@@ -478,6 +569,8 @@ fn print_sources(top: &[(f32, &Chunk)]) {
     }
 }
 
+/// Formats retrieved chunks into the context block handed to the model,
+/// each one labeled with its source path.
 fn build_context(top: &[(f32, &Chunk)]) -> String {
     top.iter()
         .map(|(_, c)| format!("Source: {}\n{}", c.source, c.text))
@@ -487,6 +580,8 @@ fn build_context(top: &[(f32, &Chunk)]) -> String {
 
 // ---------- query ----------
 
+/// One-shot: retrieve, print sources, generate, print the answer. Bails if
+/// there's no index yet or it's empty.
 async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> Result<()> {
     let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
     if index.chunks.is_empty() {
@@ -504,6 +599,11 @@ async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> 
 
 // ---------- chat (streaming, multi-turn REPL; ollama only for now) ----------
 
+/// Interactive loop: read a question from stdin, retrieve + print sources,
+/// stream the answer from Ollama, then fold both into `history` so the next
+/// turn's `ollama_chat_stream` call has full conversation context. Ends on
+/// `exit`/`quit` or EOF (Ctrl-D). History is in-memory only — nothing is
+/// persisted, so it's gone once the process exits.
 async fn chat_repl(client: &reqwest::Client) -> Result<()> {
     let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
     if index.chunks.is_empty() {
@@ -551,6 +651,9 @@ async fn chat_repl(client: &reqwest::Client) -> Result<()> {
 
 // ---------- provider dispatch ----------
 
+/// Embeds `texts` with `provider`'s API. Panics-free but always errs for
+/// `Provider::Claude`, which has no embeddings endpoint — callers only
+/// reach this for `Ollama`/`HuggingFace` (see [`ingest`] and [`retrieve`]).
 async fn embed_texts(client: &reqwest::Client, provider: Provider, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     match provider {
         Provider::Ollama => ollama_embed(client, texts).await,
@@ -559,6 +662,8 @@ async fn embed_texts(client: &reqwest::Client, provider: Provider, texts: &[Stri
     }
 }
 
+/// Makes one generation call to `provider`, answering `question` from
+/// `context`. All three providers support this (unlike embeddings).
 async fn generate(client: &reqwest::Client, provider: Provider, question: &str, context: &str) -> Result<String> {
     match provider {
         Provider::Claude => claude_generate(client, question, context).await,
@@ -600,6 +705,9 @@ fn anthropic_base() -> String {
     env::var("ANTHROPIC_API_BASE").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
 }
 
+/// One non-streaming call to the Anthropic Messages API. Requires
+/// `ANTHROPIC_API_KEY`; base URL overridable via `ANTHROPIC_API_BASE`
+/// (defaults to the real API — used in tests to point at a mock server).
 async fn claude_generate(client: &reqwest::Client, question: &str, context: &str) -> Result<String> {
     let api_key = env::var("ANTHROPIC_API_KEY").context("set ANTHROPIC_API_KEY")?;
     let user = format!("Context:\n{}\n\nQuestion: {}", context, question);
@@ -655,6 +763,9 @@ struct OllamaEmbedResponse {
     embeddings: Vec<Vec<f32>>,
 }
 
+/// Batch-embeds `texts` via Ollama's `/api/embed` (one HTTP call for the
+/// whole batch, not one per text). Model from `OLLAMA_EMBED_MODEL`
+/// (default `nomic-embed-text`), host from `OLLAMA_HOST`.
 async fn ollama_embed(client: &reqwest::Client, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let body = OllamaEmbedRequest { model: ollama_embed_model(), input: texts };
     let resp = client
@@ -683,6 +794,8 @@ struct OllamaGenerateResponse {
     response: String,
 }
 
+/// One non-streaming call to Ollama's `/api/generate`, used by `query`
+/// (unlike `chat`, which streams via [`ollama_chat_stream`] instead).
 async fn ollama_generate(client: &reqwest::Client, question: &str, context: &str) -> Result<String> {
     let body = OllamaGenerateRequest {
         model: ollama_gen_model(),
@@ -800,6 +913,10 @@ fn hf_base() -> String {
     env::var("HF_API_BASE").unwrap_or_else(|_| "https://api-inference.huggingface.co".to_string())
 }
 
+/// Calls the HF Inference API's feature-extraction endpoint for `texts`.
+/// Expects the model to return one pooled vector per input (true of
+/// sentence-transformers-style models, not of raw token-level models) —
+/// errors with a hint if the response shape doesn't match.
 async fn hf_embed(client: &reqwest::Client, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let token = hf_token()?;
     let url = format!("{}/models/{}", hf_base(), hf_embed_model());
@@ -824,6 +941,10 @@ struct HfGenerationItem {
     generated_text: String,
 }
 
+/// Calls the HF Inference API's text-generation endpoint. Note this is the
+/// classic serverless `api-inference.huggingface.co` API, not HF's newer
+/// OpenAI-compatible router — model availability there shifts over time
+/// (see the README's note on `HF_GEN_MODEL` 404s).
 async fn hf_generate(client: &reqwest::Client, question: &str, context: &str) -> Result<String> {
     let token = hf_token()?;
     let url = format!("{}/models/{}", hf_base(), hf_gen_model());
@@ -845,11 +966,17 @@ async fn hf_generate(client: &reqwest::Client, question: &str, context: &str) ->
 
 // ---------- index persistence ----------
 
+/// Deserializes an [`Index`] from its bincode encoding. Errors (rather than
+/// panics) on a missing file or a format that doesn't match the current
+/// `Index`/`Chunk` shape — bincode isn't guaranteed compatible across
+/// versions of this program, unlike a self-describing format like JSON.
 fn load_index(path: &Path) -> Result<Index> {
     let data = fs::read(path)?;
     Ok(bincode::deserialize(&data)?)
 }
 
+/// Bincode-encodes and writes the whole index in one shot (no incremental
+/// append — the full file is rewritten on every `ingest`).
 fn save_index(index: &Index, path: &Path) -> Result<()> {
     let data = bincode::serialize(index)?;
     fs::write(path, data)?;

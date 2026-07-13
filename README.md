@@ -103,6 +103,12 @@ if the default 404s, pick another model from the HF Hub and override
 
 ## How it works
 
+The whole program is one file, [`src/main.rs`](src/main.rs), with a module
+doc comment at the top giving the same overview as this section plus links
+to every function it mentions. Every non-trivial function has a `///` doc
+comment on its contract/gotchas (not just what the name already says); run
+`cargo doc --open --document-private-items` to browse it as generated docs.
+
 - **Input formats**: there's no extension allowlist — `ingest` picks up
   every file under the given path. `.pdf` is run through
   [pdf-extract](https://docs.rs/pdf-extract) to pull out its text layer;

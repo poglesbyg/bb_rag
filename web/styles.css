@@ -1,0 +1,651 @@
+/* ============================================================
+   bb_rag landing page — design system implementation
+   Fonts: JetBrains Mono + Instrument Sans (self-hosted from ./fonts/)
+   Run ./download-fonts.sh once to populate the fonts/ directory.
+   ============================================================ */
+
+/* ------------------------------------------------------------
+   @font-face — self-hosted
+   ------------------------------------------------------------ */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Light.woff2') format('woff2');
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./fonts/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+/* Instrument Sans is a variable font — one file covers weights 400–600 */
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('./fonts/InstrumentSans.woff2') format('woff2');
+  font-weight: 400 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ------------------------------------------------------------
+   Custom properties
+   ------------------------------------------------------------ */
+:root {
+  /* colors */
+  --bg:         #131110;
+  --bg-2:       #1C1A17;
+  --bg-3:       #242118;
+  --border:     #2E2B25;
+  --text:       #EDE8E0;
+  --text-2:     #A89F94;
+  --text-3:     #6B6158;
+  --accent:     #D4953A;
+  --accent-2:   #B87A28;
+  --accent-bg:  rgba(212, 149, 58, 0.08);
+  --success:    #5B8C5A;
+  --error:      #C05858;
+  --term-bg:    #0D0C0A;
+
+  /* typography */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  --font-body: 'Instrument Sans', 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+  /* spacing */
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 48px;
+  --space-6: 64px;
+  --space-7: 96px;
+
+  --max-width: 1100px;
+  --section-pad: var(--space-6);
+}
+
+/* ------------------------------------------------------------
+   Reset + base
+   ------------------------------------------------------------ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  color: var(--text-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+/* ------------------------------------------------------------
+   Layout primitives
+   ------------------------------------------------------------ */
+.container {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 0 var(--space-3);
+}
+
+.section {
+  border-top: 1px solid var(--border);
+  padding: var(--section-pad) 0;
+}
+
+/* ------------------------------------------------------------
+   Typography
+   ------------------------------------------------------------ */
+h1 {
+  font-family: var(--font-mono);
+  font-size: clamp(32px, 5vw, 56px);
+  font-weight: 400;
+  line-height: 1.15;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-family: var(--font-mono);
+  font-size: clamp(20px, 3vw, 28px);
+  font-weight: 400;
+  color: var(--text);
+  margin-bottom: var(--space-4);
+  letter-spacing: -0.01em;
+}
+
+/* ------------------------------------------------------------
+   Navigation
+   ------------------------------------------------------------ */
+#nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: var(--bg);
+  height: 48px;
+  border-bottom: 1px solid transparent;
+  transition: border-color 120ms ease-out;
+}
+
+#nav.scrolled {
+  border-bottom-color: var(--border);
+}
+
+.nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 100%;
+}
+
+.nav-logo {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 0;
+  user-select: none;
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ------------------------------------------------------------
+   Buttons
+   ------------------------------------------------------------ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 10px 20px;
+  border-radius: 0;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, border-color 120ms ease-out, color 120ms ease-out;
+  white-space: nowrap;
+  min-height: 44px;
+  text-decoration: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #131110;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-2);
+  border-color: var(--border);
+}
+
+.btn-ghost:hover {
+  background: var(--bg-2);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------
+   Terminal block
+   ------------------------------------------------------------ */
+.term-block {
+  background: var(--term-bg);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.term-block div,
+.term-block p {
+  white-space: nowrap;
+}
+
+.term-spacer {
+  height: var(--space-1);
+  display: block;
+}
+
+/* terminal color roles */
+.t-dim    { color: var(--text-3); }
+.t-accent { color: var(--accent); }
+.t-green  { color: var(--success); }
+.t-red    { color: var(--error); }
+.t-muted  { color: var(--text-2); }
+
+/* ------------------------------------------------------------
+   Copy block
+   ------------------------------------------------------------ */
+.copy-block {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.copy-block .cmd-text {
+  flex: 1;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 0;
+  transition: border-color 120ms ease-out, color 120ms ease-out;
+  min-height: 44px;
+  min-width: 44px;
+  white-space: nowrap;
+}
+
+.copy-btn:hover {
+  border-color: var(--text-3);
+  color: var(--text);
+}
+
+.copy-btn.copied {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------
+   Badges
+   ------------------------------------------------------------ */
+.badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  border-radius: 0;
+  vertical-align: middle;
+}
+
+.badge-accent {
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.badge-muted {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------
+   Hero
+   ------------------------------------------------------------ */
+.hero {
+  padding: var(--space-7) 0 var(--space-6);
+}
+
+.hero-sub {
+  font-size: 17px;
+  color: var(--text-2);
+  line-height: 1.6;
+  max-width: 620px;
+  margin-top: var(--space-3);
+}
+
+.hero-cta {
+  margin-top: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  max-width: 620px;
+}
+
+.hero-cta .term-block {
+  width: 100%;
+}
+
+.hero-sub-cta {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.hero-sub-cta code {
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------
+   Pipeline (how it works)
+   ------------------------------------------------------------ */
+.pipeline {
+  max-width: 640px;
+}
+
+.pipeline-step {
+  white-space: nowrap;
+}
+
+.pipeline-arrow {
+  padding-left: 0;
+}
+
+.pipeline-outputs {
+  white-space: normal;
+  line-height: 2;
+}
+
+/* ------------------------------------------------------------
+   Demo grid (bb_rag in action)
+   ------------------------------------------------------------ */
+.section-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: var(--space-1);
+}
+
+.demo-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+/* ------------------------------------------------------------
+   Feature grid
+   ------------------------------------------------------------ */
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.feature-cell {
+  background: var(--bg);
+  padding: var(--space-3);
+}
+
+.feature-label {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  margin-bottom: var(--space-1);
+  letter-spacing: 0.02em;
+}
+
+.feature-desc {
+  font-size: 15px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.feature-desc code {
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------
+   Stat grid
+   ------------------------------------------------------------ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+
+.stat-cell {
+  background: var(--bg);
+  padding: var(--space-4) var(--space-3);
+  text-align: center;
+}
+
+.stat-value {
+  font-family: var(--font-mono);
+  font-size: 40px;
+  font-weight: 300;
+  color: var(--text);
+  line-height: 1;
+  margin-bottom: var(--space-1);
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--text-3);
+  font-family: var(--font-body);
+}
+
+/* ------------------------------------------------------------
+   Install steps
+   ------------------------------------------------------------ */
+.install-steps {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--space-3);
+}
+
+.install-step {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+  align-items: flex-start;
+}
+
+.install-step:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.step-num {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  width: 20px;
+  flex-shrink: 0;
+  padding-top: 14px;
+}
+
+.step-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.step-label {
+  font-size: 14px;
+  color: var(--text-2);
+  margin-bottom: var(--space-1);
+  font-family: var(--font-body);
+}
+
+.install-note {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-3);
+  padding-top: var(--space-2);
+}
+
+.install-note code {
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------
+   Footer
+   ------------------------------------------------------------ */
+footer {
+  border-top: 1px solid var(--border);
+  padding: var(--space-3) 0;
+}
+
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.footer-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.footer-logo {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.footer-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.footer-link {
+  color: var(--text-3);
+  transition: color 120ms ease-out;
+}
+
+.footer-link:hover {
+  color: var(--text-2);
+}
+
+/* ------------------------------------------------------------
+   Responsive — tablet (768–1099px)
+   ------------------------------------------------------------ */
+@media (max-width: 1099px) {
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ------------------------------------------------------------
+   Responsive — mobile (<768px)
+   ------------------------------------------------------------ */
+@media (max-width: 767px) {
+  :root {
+    --section-pad: var(--space-4);
+  }
+
+  .hero {
+    padding: var(--space-5) 0 var(--space-4);
+  }
+
+  .nav-github {
+    display: none;
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .demo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .term-block {
+    overflow-x: scroll;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .term-block div,
+  .term-block p {
+    white-space: nowrap;
+  }
+
+  .footer-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+  }
+}
+
+/* ------------------------------------------------------------
+   Reduced motion — override all transitions
+   (also set at root reset above, repeated here for specificity)
+   ------------------------------------------------------------ */
+@media (prefers-reduced-motion: reduce) {
+  .copy-btn,
+  .btn,
+  #nav,
+  .footer-link {
+    transition: none;
+  }
+}

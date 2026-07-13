@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bb_rag — bare-bones RAG in Rust</title>
+  <meta name="description" content="bb_rag is a bare-bones retrieval-augmented generation CLI in Rust. No vector DB, no framework — ingest any file, embed with Claude, Ollama, or Hugging Face, and get grounded answers from one binary.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- NAVIGATION -->
+  <nav id="nav" role="navigation" aria-label="Main navigation">
+    <div class="container nav-inner">
+      <span class="nav-logo" aria-label="bb_rag">bb_rag</span>
+      <div class="nav-actions">
+        <a href="https://github.com/poglesbyg/bb_rag" class="btn btn-ghost nav-github" aria-label="View on GitHub">GitHub</a>
+        <a href="#install" class="btn btn-primary">get started</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="container">
+      <h1>RAG shouldn't need a server.<br>bb_rag doesn't have one.</h1>
+      <p class="hero-sub">bb_rag ingests any file — .txt, .md, .pdf, .docx, or anything else that's plain text — chunks it by sentence, and answers questions from it with Claude, Ollama, or Hugging&nbsp;Face. No vector database, no framework: just one binary and a local index file.</p>
+      <div class="hero-cta">
+        <div class="term-block copy-block" role="region" aria-label="Install command">
+          <span class="t-dim">$</span>
+          <span class="cmd-text">git clone https://github.com/poglesbyg/bb_rag && cd bb_rag && cargo install --path .</span>
+          <button class="copy-btn" aria-label="Copy install command" data-copy="git clone https://github.com/poglesbyg/bb_rag && cd bb_rag && cargo install --path .">copy</button>
+        </div>
+        <p class="hero-sub-cta"><span class="t-dim">or</span> <code>cargo run -- query "..."</code> from inside the repo — no install needed</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section" aria-labelledby="how-heading">
+    <div class="container">
+      <h2 id="how-heading">How it works</h2>
+      <div class="term-block pipeline" role="region" aria-label="How bb_rag works">
+        <div class="pipeline-step">
+          <span class="t-accent">any file</span>
+          <span class="t-dim"> ── </span>
+          <span class="t-muted">.txt · .md · .pdf · .docx · flat text, chunked by sentence</span>
+        </div>
+        <div class="pipeline-arrow"><span class="t-dim">    ↓</span></div>
+        <div class="pipeline-step">
+          <span class="t-accent">claude · ollama · huggingface</span>
+          <span class="t-dim"> ── </span>
+          <span class="t-muted">embedded (or skipped → TF-IDF)</span>
+        </div>
+        <div class="pipeline-arrow"><span class="t-dim">    ↓</span></div>
+        <div class="pipeline-step">
+          <span class="t-accent">index.bin</span>
+          <span class="t-dim"> ── </span>
+          <span class="t-muted">bincode-encoded, one local file</span>
+        </div>
+        <div class="pipeline-arrow"><span class="t-dim">    ↓</span></div>
+        <div class="pipeline-outputs">
+          <span class="t-green">query</span>
+          <span class="t-dim"> · </span>
+          <span class="t-green">chat</span>
+          <span class="t-dim"> — </span>
+          <span class="t-muted">cosine-ranked context, grounded answer</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- BB_RAG IN ACTION -->
+  <section class="section" aria-labelledby="demo-heading">
+    <div class="container">
+      <h2 id="demo-heading">bb_rag in action</h2>
+      <div class="demo-grid">
+        <div>
+          <p class="section-label">$ bb_rag ingest docs/ --provider ollama</p>
+          <div class="term-block" role="region" aria-label="bb_rag ingest terminal output">
+            <div><span class="t-muted">chunked 1 file(s) into 1 chunks</span></div>
+            <div><span class="t-muted">(embeddings: </span><span class="t-accent">ollama</span><span class="t-muted">);</span></div>
+            <div><span class="t-muted">index now has 1 chunk(s) -&gt; </span><span class="t-accent">index.bin</span></div>
+            <div class="term-spacer"></div>
+            <div class="t-dim">$ bb_rag chat --provider ollama</div>
+            <div class="term-spacer"></div>
+            <div class="t-muted">bb_rag chat (ollama) — type 'exit' or Ctrl-D to leave.</div>
+          </div>
+        </div>
+
+        <div>
+          <p class="section-label">multi-turn memory, sources every time</p>
+          <div class="term-block" role="region" aria-label="bb_rag chat terminal output">
+            <div><span class="t-dim">&gt;</span> <span class="t-muted">what is bb_rag?</span></div>
+            <div class="t-dim">--- sources ---</div>
+            <div><span class="t-accent">[0.702]</span> <span class="t-muted">docs/sample.md</span></div>
+            <div class="term-spacer"></div>
+            <div><span class="t-green">&lt;</span> <span class="t-muted">bb_rag is a bare-bones retrieval-augmented</span></div>
+            <div class="t-muted">&nbsp;&nbsp;generation CLI written in Rust.</div>
+            <div class="term-spacer"></div>
+            <div><span class="t-dim">&gt;</span> <span class="t-muted">what did I just ask you?</span></div>
+            <div class="t-dim">--- sources ---</div>
+            <div><span class="t-accent">[0.438]</span> <span class="t-muted">docs/sample.md</span></div>
+            <div class="term-spacer"></div>
+            <div><span class="t-green">&lt;</span> <span class="t-muted">You asked me to describe "bb_rag"</span></div>
+            <div class="t-muted">&nbsp;&nbsp;according to the provided context.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FEATURES -->
+  <section class="section" aria-labelledby="features-heading">
+    <div class="container">
+      <h2 id="features-heading">What it does</h2>
+      <div class="feature-grid" role="list">
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">Three providers</div>
+          <div class="feature-desc">Claude, Ollama, or Hugging Face — swap with <code>--provider</code>, mix embedding and generation independently.</div>
+        </div>
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">Any file</div>
+          <div class="feature-desc">.txt, .md, .pdf, .docx, or any flat text file. No extension allowlist; unreadable files are skipped, not fatal.</div>
+        </div>
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">Sentence-aware chunking</div>
+          <div class="feature-desc">Packs whole sentences under a size budget with overlap. Never cuts mid-sentence.</div>
+        </div>
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">Streaming chat</div>
+          <div class="feature-desc">A REPL with live token streaming and multi-turn memory, via Ollama.</div>
+        </div>
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">No server</div>
+          <div class="feature-desc">One binary, one local <code>index.bin</code> file. No vector database to run or manage.</div>
+        </div>
+        <div class="feature-cell" role="listitem">
+          <div class="feature-label">TF-IDF fallback</div>
+          <div class="feature-desc">No embeddings API? Claude falls back to in-process TF-IDF automatically — <code>ingest</code> stays fully offline.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section class="section" aria-label="Stats">
+    <div class="container">
+      <div class="stat-grid">
+        <div class="stat-cell">
+          <div class="stat-value">3</div>
+          <div class="stat-label">providers supported</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">51</div>
+          <div class="stat-label">tests passing</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">0</div>
+          <div class="stat-label">servers required</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-value">1</div>
+          <div class="stat-label">binary</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL / QUICKSTART -->
+  <section class="section" id="install" aria-labelledby="install-heading">
+    <div class="container">
+      <h2 id="install-heading">Get started</h2>
+      <div class="install-steps">
+
+        <div class="install-step">
+          <div class="step-num t-dim" aria-hidden="true">1</div>
+          <div class="step-content">
+            <div class="step-label">Clone & install</div>
+            <div class="term-block copy-block" role="region" aria-label="Clone and install command">
+              <span class="t-dim">$</span>
+              <span class="cmd-text">git clone https://github.com/poglesbyg/bb_rag && cd bb_rag && cargo install --path .</span>
+              <button class="copy-btn" aria-label="Copy clone and install command" data-copy="git clone https://github.com/poglesbyg/bb_rag && cd bb_rag && cargo install --path .">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="install-step">
+          <div class="step-num t-dim" aria-hidden="true">2</div>
+          <div class="step-content">
+            <div class="step-label">Set your API key</div>
+            <div class="term-block copy-block" role="region" aria-label="Setup env command">
+              <span class="t-dim">$</span>
+              <span class="cmd-text">cp .env.example .env</span>
+              <button class="copy-btn" aria-label="Copy env setup command" data-copy="cp .env.example .env">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="install-step">
+          <div class="step-num t-dim" aria-hidden="true">3</div>
+          <div class="step-content">
+            <div class="step-label">Ingest your docs</div>
+            <div class="term-block copy-block" role="region" aria-label="Ingest command">
+              <span class="t-dim">$</span>
+              <span class="cmd-text">bb_rag ingest docs/</span>
+              <button class="copy-btn" aria-label="Copy ingest command" data-copy="bb_rag ingest docs/">copy</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="install-step">
+          <div class="step-num t-dim" aria-hidden="true">4</div>
+          <div class="step-content">
+            <div class="step-label">Ask a question</div>
+            <div class="term-block copy-block" role="region" aria-label="Query command">
+              <span class="t-dim">$</span>
+              <span class="cmd-text">bb_rag query "What's in these docs?"</span>
+              <button class="copy-btn" aria-label="Copy query command" data-copy='bb_rag query "What'"'"'s in these docs?"'>copy</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+      <p class="install-note">
+        <span class="t-dim">No API key?</span>
+        Use <code>--provider ollama</code> — free, private, runs on your machine.
+      </p>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer role="contentinfo">
+    <div class="container footer-inner">
+      <div class="footer-left">
+        <span class="footer-logo">bb_rag</span>
+        <span class="badge badge-muted">Rust</span>
+      </div>
+      <div class="footer-right">
+        <a href="https://github.com/poglesbyg/bb_rag" class="footer-link">GitHub</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

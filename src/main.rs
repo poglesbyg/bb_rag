@@ -115,14 +115,13 @@ fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
 async fn ingest(client: &reqwest::Client, path: &Path, provider: Provider) -> Result<()> {
     let files = collect_files(path)?;
     if files.is_empty() {
-        bail!("no .txt or .md files found at {}", path.display());
+        bail!("no .txt, .md, or .pdf files found at {}", path.display());
     }
 
     let mut texts = Vec::new();
     let mut sources = Vec::new();
     for file in &files {
-        let content = fs::read_to_string(file)
-            .with_context(|| format!("reading {}", file.display()))?;
+        let content = read_file_text(file)?;
         for chunk in chunk_text(&content, CHUNK_SIZE, CHUNK_OVERLAP) {
             sources.push(file.display().to_string());
             texts.push(chunk);
@@ -176,8 +175,21 @@ fn collect_files(path: &Path) -> Result<Vec<PathBuf>> {
     } else {
         bail!("path not found: {}", path.display());
     }
-    out.retain(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("txt") | Some("md")));
+    out.retain(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("txt") | Some("md") | Some("pdf")));
     Ok(out)
+}
+
+fn read_file_text(path: &Path) -> Result<String> {
+    if path.extension().and_then(|e| e.to_str()) == Some("pdf") {
+        pdf_extract::extract_text(path).with_context(|| {
+            format!(
+                "extracting text from {}; scanned/image-only PDFs have no text layer to extract",
+                path.display()
+            )
+        })
+    } else {
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
+    }
 }
 
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -788,6 +800,44 @@ fn save_index(index: &Index, path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Builds a minimal single-page PDF containing "Hello PDF world", with
+    /// correctly computed xref byte offsets (pdf-extract doesn't recover from
+    /// a bogus xref table, so these have to be real).
+    fn build_minimal_pdf() -> Vec<u8> {
+        let stream: &[u8] = b"BT /F1 24 Tf 10 100 Td (Hello PDF world) Tj ET";
+        let objs: Vec<Vec<u8>> = vec![
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec(),
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_vec(),
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 200 200] /Contents 5 0 R >>\nendobj\n".to_vec(),
+            b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_vec(),
+            {
+                let mut o = format!("5 0 obj\n<< /Length {} >>\nstream\n", stream.len()).into_bytes();
+                o.extend_from_slice(stream);
+                o.extend_from_slice(b"\nendstream\nendobj\n");
+                o
+            },
+        ];
+
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for o in &objs {
+            offsets.push(out.len());
+            out.extend_from_slice(o);
+        }
+
+        let xref_start = out.len();
+        let n = objs.len() + 1;
+        let mut xref = format!("xref\n0 {n}\n0000000000 65535 f \n").into_bytes();
+        for off in &offsets {
+            xref.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(&xref);
+        out.extend_from_slice(
+            format!("trailer\n<< /Size {n} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n").as_bytes(),
+        );
+        out
+    }
+
     // ---------- chunk_text ----------
 
     #[test]
@@ -1031,18 +1081,19 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "a").unwrap();
         fs::write(dir.path().join("b.md"), "b").unwrap();
         fs::write(dir.path().join("c.png"), "not text").unwrap();
+        fs::write(dir.path().join("e.pdf"), b"not a real pdf, just checking the extension filter").unwrap();
         let nested = dir.path().join("nested");
         fs::create_dir(&nested).unwrap();
         fs::write(nested.join("d.txt"), "d").unwrap();
 
-        let mut files = collect_files(dir.path()).unwrap();
-        files.sort();
+        let files = collect_files(dir.path()).unwrap();
 
-        let names: Vec<String> = files
+        let mut names: Vec<String> = files
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert_eq!(names, vec!["a.txt", "b.md", "d.txt"]);
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.md", "d.txt", "e.pdf"]);
     }
 
     #[test]
@@ -1057,6 +1108,31 @@ mod tests {
     fn collect_files_missing_path_errs() {
         let dir = tempfile::tempdir().unwrap();
         assert!(collect_files(&dir.path().join("does-not-exist")).is_err());
+    }
+
+    // ---------- read_file_text ----------
+
+    #[test]
+    fn read_file_text_plain_text_reads_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "hello there").unwrap();
+        assert_eq!(read_file_text(&file).unwrap(), "hello there");
+    }
+
+    #[test]
+    fn read_file_text_extracts_pdf_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.pdf");
+        fs::write(&file, build_minimal_pdf()).unwrap();
+        let text = read_file_text(&file).unwrap();
+        assert!(text.contains("Hello PDF world"), "got: {text:?}");
+    }
+
+    #[test]
+    fn read_file_text_missing_file_errs() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_file_text(&dir.path().join("nope.txt")).is_err());
     }
 
     // ---------- index persistence ----------

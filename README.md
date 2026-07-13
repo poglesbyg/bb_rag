@@ -58,7 +58,7 @@ embeddings); with `--provider claude` (the default) it runs fully offline.
 ## Usage
 
 ```
-# Ingest one file or a whole directory (.txt / .md files)
+# Ingest one file or a whole directory (.txt / .md / .pdf files)
 bb_rag ingest docs/                        # claude/TF-IDF, offline
 bb_rag ingest docs/ --provider ollama       # real embeddings via ollama
 bb_rag ingest docs/ --provider huggingface  # real embeddings via HF
@@ -100,6 +100,10 @@ if the default 404s, pick another model from the HF Hub and override
 
 ## How it works
 
+- **Input formats**: `.txt` and `.md` are read verbatim; `.pdf` is run
+  through [pdf-extract](https://docs.rs/pdf-extract) to pull out its text
+  layer. Scanned/image-only PDFs have no text layer, so nothing to extract —
+  ingest will error on those (no OCR here).
 - **Chunking**: sentence-aware packing up to an ~800-char budget with
   ~100-char overlap — sentences are never split mid-way; only a single
   "sentence" bigger than the whole budget (e.g. unpunctuated text) falls

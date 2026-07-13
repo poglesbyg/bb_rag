@@ -183,7 +183,53 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
+fn split_sentences(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        current.push(c);
+        if matches!(c, '.' | '!' | '?') {
+            let at_boundary = chars.get(i + 1).is_none_or(char::is_ascii_whitespace);
+            if at_boundary {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    sentences.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        sentences.push(trimmed.to_string());
+    }
+    sentences
+}
+
+/// Keeps whole trailing sentences (not partial ones) totaling up to `budget`
+/// chars, always keeping at least the last sentence so every chunk after the
+/// first has some continuity with the one before it.
+fn take_overlap(sentences: &[String], budget: usize) -> (Vec<String>, usize) {
+    if budget == 0 || sentences.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let mut carried = Vec::new();
+    let mut len = 0;
+    for sentence in sentences.iter().rev() {
+        let sentence_len = sentence.chars().count();
+        if !carried.is_empty() && len + 1 + sentence_len > budget {
+            break;
+        }
+        len += if carried.is_empty() { sentence_len } else { sentence_len + 1 };
+        carried.insert(0, sentence.clone());
+    }
+    (carried, len)
+}
+
+/// Fixed-size character window, only used when a single "sentence" (e.g. text
+/// with no sentence-ending punctuation) is bigger than the whole chunk budget.
+fn hard_split(text: &str, size: usize, overlap: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
         return Vec::new();
@@ -200,8 +246,49 @@ fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
         if end == chars.len() {
             break;
         }
-        start += size - overlap;
+        start += size.saturating_sub(overlap).max(1);
     }
+    chunks
+}
+
+fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
+    let sentences = split_sentences(text);
+    if sentences.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut current_len = 0;
+
+    for sentence in sentences {
+        let sentence_len = sentence.chars().count();
+
+        if sentence_len > size {
+            if !current.is_empty() {
+                chunks.push(current.join(" "));
+                current.clear();
+                current_len = 0;
+            }
+            chunks.extend(hard_split(&sentence, size, overlap));
+            continue;
+        }
+
+        if !current.is_empty() && current_len + 1 + sentence_len > size {
+            chunks.push(current.join(" "));
+            let (carried, carried_len) = take_overlap(&current, overlap);
+            current = carried;
+            current_len = carried_len;
+        }
+
+        current_len += if current.is_empty() { sentence_len } else { sentence_len + 1 };
+        current.push(sentence);
+    }
+
+    if !current.is_empty() {
+        chunks.push(current.join(" "));
+    }
+
     chunks
 }
 
@@ -566,16 +653,98 @@ mod tests {
     }
 
     #[test]
-    fn chunk_text_splits_with_overlap() {
-        let text = "0123456789abcdefghij"; // 20 chars
+    fn chunk_text_drops_whitespace_only_pieces() {
+        let chunks = chunk_text("a   ", 1, 0);
+        assert!(chunks.iter().all(|c| !c.trim().is_empty()));
+    }
+
+    #[test]
+    fn chunk_text_never_splits_mid_sentence_when_sentences_fit() {
+        let text = "Alpha bravo charlie. Delta echo foxtrot. Golf hotel india.";
+        let chunks = chunk_text(text, 42, 0);
+        assert_eq!(
+            chunks,
+            vec!["Alpha bravo charlie. Delta echo foxtrot.", "Golf hotel india."]
+        );
+        for chunk in &chunks {
+            assert!(chunk.ends_with(['.', '!', '?']), "chunk cut mid-sentence: {chunk:?}");
+        }
+    }
+
+    #[test]
+    fn chunk_text_overlap_repeats_a_whole_trailing_sentence() {
+        let text = "One two three. Four five six. Seven eight nine.";
+        let chunks = chunk_text(text, 30, 15);
+        assert!(chunks.len() >= 2);
+        assert!(chunks[1].starts_with("Four five six."));
+    }
+
+    #[test]
+    fn chunk_text_falls_back_to_hard_split_for_unpunctuated_run_on_text() {
+        // no sentence-ending punctuation anywhere, so it can't be packed by sentence
+        let text = "0123456789abcdefghij";
         let chunks = chunk_text(text, 10, 3);
         assert_eq!(chunks, vec!["0123456789", "789abcdefg", "efghij"]);
     }
 
+    // ---------- split_sentences ----------
+
     #[test]
-    fn chunk_text_drops_whitespace_only_pieces() {
-        let chunks = chunk_text("a   ", 1, 0);
-        assert!(chunks.iter().all(|c| !c.trim().is_empty()));
+    fn split_sentences_splits_on_terminal_punctuation() {
+        assert_eq!(
+            split_sentences("Hello world. How are you? Fine!"),
+            vec!["Hello world.", "How are you?", "Fine!"]
+        );
+    }
+
+    #[test]
+    fn split_sentences_keeps_text_without_trailing_punctuation() {
+        assert_eq!(split_sentences("just one clause"), vec!["just one clause"]);
+    }
+
+    #[test]
+    fn split_sentences_empty_input_is_empty() {
+        assert_eq!(split_sentences(""), Vec::<String>::new());
+    }
+
+    // ---------- take_overlap ----------
+
+    #[test]
+    fn take_overlap_carries_trailing_sentences_within_budget() {
+        let sentences = vec![
+            "Short one.".to_string(),
+            "A bit longer sentence.".to_string(),
+            "Tiny.".to_string(),
+        ];
+        let (carried, len) = take_overlap(&sentences, 10);
+        assert_eq!(carried, vec!["Tiny.".to_string()]);
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn take_overlap_always_keeps_at_least_the_last_sentence() {
+        let sentences = vec!["This one is definitely longer than the overlap budget.".to_string()];
+        let (carried, _) = take_overlap(&sentences, 5);
+        assert_eq!(carried, sentences);
+    }
+
+    #[test]
+    fn take_overlap_zero_budget_carries_nothing() {
+        assert_eq!(take_overlap(&["a.".to_string()], 0), (Vec::new(), 0));
+    }
+
+    // ---------- hard_split ----------
+
+    #[test]
+    fn hard_split_windows_with_overlap() {
+        let chunks = hard_split("0123456789abcdefghij", 10, 3);
+        assert_eq!(chunks, vec!["0123456789", "789abcdefg", "efghij"]);
+    }
+
+    #[test]
+    fn hard_split_overlap_ge_size_does_not_hang() {
+        let chunks = hard_split("abcdef", 2, 5);
+        assert!(!chunks.is_empty());
     }
 
     // ---------- tokenize ----------

@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_MODEL: &str = "claude-sonnet-5";
@@ -78,13 +80,21 @@ async fn main() -> Result<()> {
             }
             query(&client, &question, provider).await?;
         }
+        Some("chat") => {
+            if provider != Provider::Ollama {
+                bail!("chat currently only supports --provider ollama");
+            }
+            chat_repl(&client).await?;
+        }
         _ => {
             println!(
                 "usage:\n  \
                 bb_rag ingest <file-or-dir> [--provider claude|ollama|huggingface]\n  \
-                bb_rag query <question> [--provider claude|ollama|huggingface]\n\n\
+                bb_rag query <question> [--provider claude|ollama|huggingface]\n  \
+                bb_rag chat [--provider ollama]\n\n\
                 claude has no embeddings API, so it always falls back to local TF-IDF retrieval.\n\
-                ollama and huggingface compute real embeddings at ingest time and reuse them at query time."
+                ollama and huggingface compute real embeddings at ingest time and reuse them at query time.\n\
+                chat is a streaming, multi-turn REPL; currently ollama-only."
             );
         }
     }
@@ -358,15 +368,10 @@ fn dense_cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-// ---------- query ----------
+// ---------- retrieval (shared by query and chat) ----------
 
-async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> Result<()> {
-    let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
-    if index.chunks.is_empty() {
-        bail!("index is empty; run `bb_rag ingest` first");
-    }
-
-    let top: Vec<(f32, &Chunk)> = match &index.embedding_provider {
+async fn retrieve<'a>(client: &reqwest::Client, index: &'a Index, question: &str) -> Result<Vec<(f32, &'a Chunk)>> {
+    let top = match &index.embedding_provider {
         Some(embed_provider_str) => {
             let embed_provider = Provider::parse(embed_provider_str)?;
             let embedded: Vec<&Chunk> = index.chunks.iter().filter(|c| c.embedding.is_some()).collect();
@@ -399,20 +404,84 @@ async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> 
             scored.into_iter().take(TOP_K).collect()
         }
     };
+    Ok(top)
+}
 
-    println!("--- retrieved context ---");
-    for (score, chunk) in &top {
+fn print_sources(top: &[(f32, &Chunk)]) {
+    println!("--- sources ---");
+    for (score, chunk) in top {
         println!("[{:.3}] {}", score, chunk.source);
     }
+}
 
-    let context = top
-        .iter()
+fn build_context(top: &[(f32, &Chunk)]) -> String {
+    top.iter()
         .map(|(_, c)| format!("Source: {}\n{}", c.source, c.text))
         .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
+        .join("\n\n---\n\n")
+}
+
+// ---------- query ----------
+
+async fn query(client: &reqwest::Client, question: &str, provider: Provider) -> Result<()> {
+    let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
+    if index.chunks.is_empty() {
+        bail!("index is empty; run `bb_rag ingest` first");
+    }
+
+    let top = retrieve(client, &index, question).await?;
+    print_sources(&top);
+    let context = build_context(&top);
 
     let answer = generate(client, provider, question, &context).await?;
     println!("\n--- answer ---\n{}", answer);
+    Ok(())
+}
+
+// ---------- chat (streaming, multi-turn REPL; ollama only for now) ----------
+
+async fn chat_repl(client: &reqwest::Client) -> Result<()> {
+    let index = load_index(Path::new(INDEX_FILE)).context("no index found; run `bb_rag ingest` first")?;
+    if index.chunks.is_empty() {
+        bail!("index is empty; run `bb_rag ingest` first");
+    }
+
+    println!("bb_rag chat (ollama) — type 'exit' or Ctrl-D to leave.\n");
+
+    let mut history: Vec<OllamaChatMessage> = Vec::new();
+    let stdin = io::stdin();
+
+    loop {
+        print!("> ");
+        io::stdout().flush()?;
+
+        let mut line = String::new();
+        if stdin.lock().read_line(&mut line)? == 0 {
+            println!();
+            break;
+        }
+        let question = line.trim();
+        if question.is_empty() {
+            continue;
+        }
+        if question == "exit" || question == "quit" {
+            break;
+        }
+
+        let top = retrieve(client, &index, question).await?;
+        print_sources(&top);
+        let context = build_context(&top);
+
+        print!("\n< ");
+        io::stdout().flush()?;
+        let user_turn = format!("Context:\n{}\n\nQuestion: {}", context, question);
+        let answer = ollama_chat_stream(client, &history, &user_turn).await?;
+        println!("\n");
+
+        history.push(OllamaChatMessage { role: "user".to_string(), content: user_turn });
+        history.push(OllamaChatMessage { role: "assistant".to_string(), content: answer });
+    }
+
     Ok(())
 }
 
@@ -564,6 +633,85 @@ async fn ollama_generate(client: &reqwest::Client, question: &str, context: &str
     }
     let parsed: OllamaGenerateResponse = resp.json().await?;
     Ok(parsed.response)
+}
+
+#[derive(Serialize, Clone)]
+struct OllamaChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OllamaChatRequest<'a> {
+    model: String,
+    messages: Vec<&'a OllamaChatMessage>,
+    stream: bool,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatStreamLine {
+    #[serde(default)]
+    message: Option<OllamaChatStreamMessage>,
+    #[serde(default)]
+    done: bool,
+}
+
+#[derive(Deserialize)]
+struct OllamaChatStreamMessage {
+    #[serde(default)]
+    content: String,
+}
+
+/// Streams the assistant's reply token-by-token to stdout and returns the
+/// full text once done, so callers can append it to conversation history.
+async fn ollama_chat_stream(client: &reqwest::Client, history: &[OllamaChatMessage], user_turn: &str) -> Result<String> {
+    let system = OllamaChatMessage { role: "system".to_string(), content: SYSTEM_PROMPT.to_string() };
+    let latest = OllamaChatMessage { role: "user".to_string(), content: user_turn.to_string() };
+    let mut messages: Vec<&OllamaChatMessage> = vec![&system];
+    messages.extend(history.iter());
+    messages.push(&latest);
+
+    let body = OllamaChatRequest { model: ollama_gen_model(), messages, stream: true };
+
+    let resp = client
+        .post(format!("{}/api/chat", ollama_host()))
+        .json(&body)
+        .send()
+        .await
+        .context("connecting to ollama; is `ollama serve` running?")?;
+    if !resp.status().is_success() {
+        bail!("ollama chat request failed: {} - {}", resp.status(), resp.text().await?);
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut answer = String::new();
+    let mut stdout = io::stdout();
+
+    'outer: while let Some(chunk) = stream.next().await {
+        buffer.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(pos) = buffer.find('\n') {
+            let line = buffer[..pos].trim().to_string();
+            buffer.drain(..=pos);
+            if line.is_empty() {
+                continue;
+            }
+            let parsed: OllamaChatStreamLine =
+                serde_json::from_str(&line).with_context(|| format!("parsing ollama stream line: {line}"))?;
+            if let Some(msg) = parsed.message {
+                if !msg.content.is_empty() {
+                    print!("{}", msg.content);
+                    stdout.flush().ok();
+                    answer.push_str(&msg.content);
+                }
+            }
+            if parsed.done {
+                break 'outer;
+            }
+        }
+    }
+
+    Ok(answer)
 }
 
 // ---------- Hugging Face ----------

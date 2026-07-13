@@ -50,7 +50,18 @@ cargo run -- ingest docs/ --provider huggingface  # real embeddings via HF
 # Ask a question against the ingested index (provider picks the generator)
 cargo run -- query "What is bb_rag?"
 cargo run -- query "What is bb_rag?" --provider ollama
+
+# Interactive, streaming, multi-turn chat (ollama only, for now)
+cargo run -- chat --provider ollama
 ```
+
+`chat` opens a REPL: each turn re-runs retrieval, always prints the sources
+it found (score + path) before answering, streams the model's reply token by
+token, and keeps the whole conversation in memory so follow-up questions have
+context from earlier turns. Nothing is persisted to disk — history resets
+when you exit (`exit`/`quit`/Ctrl-D). `query` and `ingest` still work with
+any provider; `chat` currently requires `--provider ollama` since streaming
+and multi-turn history aren't wired up for claude/huggingface yet.
 
 Ingesting builds/appends to `index.json` in the working directory. Querying
 picks its retrieval strategy from what's stored there: if chunks have
@@ -73,10 +84,14 @@ if the default 404s, pick another model from the HF Hub and override
 
 ## How it works
 
-- **Chunking**: fixed-size (800 chars) sliding window with 100-char overlap.
+- **Chunking**: sentence-aware packing up to an ~800-char budget with
+  ~100-char overlap — sentences are never split mid-way; only a single
+  "sentence" bigger than the whole budget (e.g. unpunctuated text) falls
+  back to a hard character window.
 - **Retrieval**: dense cosine similarity over real embeddings (ollama/HF), or
   in-process TF-IDF cosine similarity (claude) — a linear scan either way,
   fine up to a few thousand chunks.
-- **Generation**: one HTTP call per query to whichever provider you pick,
-  with a system prompt instructing it to answer only from the retrieved
-  context.
+- **Generation**: `query` makes one buffered HTTP call per question to
+  whichever provider you pick. `chat` streams the response from Ollama's
+  `/api/chat` (NDJSON chunks printed as they arrive) and replays the growing
+  message history on every turn so the model has multi-turn context.

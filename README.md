@@ -12,6 +12,22 @@ Three providers, chosen per-command with `--provider`:
 | `ollama`      | real, via a local Ollama server | real, via a local Ollama server | `ollama serve` running |
 | `huggingface` | real, via HF Inference API   | real, via HF Inference API         | `HF_API_TOKEN` |
 
+## Install
+
+```
+cargo install --path .
+```
+
+Puts a `bb_rag` binary on your `PATH` (via `~/.cargo/bin`), so every command
+below can drop the `cargo run --` prefix — just `bb_rag ingest docs/`,
+`bb_rag chat --provider ollama`, etc. Run it from whatever directory holds
+the `docs/`, `.env`, and `index.json` you want it to use (it reads/writes
+relative to your current directory, same as `cargo run` does). Re-run
+`cargo install --path .` after pulling changes to update the installed copy.
+
+If you'd rather not install it globally, every command also works as
+`cargo run -- <args>` from inside this directory.
+
 ## Setup
 
 Copy `.env.example` to `.env` and fill in what you need — it's loaded
@@ -43,16 +59,16 @@ embeddings); with `--provider claude` (the default) it runs fully offline.
 
 ```
 # Ingest one file or a whole directory (.txt / .md files)
-cargo run -- ingest docs/                        # claude/TF-IDF, offline
-cargo run -- ingest docs/ --provider ollama       # real embeddings via ollama
-cargo run -- ingest docs/ --provider huggingface  # real embeddings via HF
+bb_rag ingest docs/                        # claude/TF-IDF, offline
+bb_rag ingest docs/ --provider ollama       # real embeddings via ollama
+bb_rag ingest docs/ --provider huggingface  # real embeddings via HF
 
 # Ask a question against the ingested index (provider picks the generator)
-cargo run -- query "What is bb_rag?"
-cargo run -- query "What is bb_rag?" --provider ollama
+bb_rag query "What is bb_rag?"
+bb_rag query "What is bb_rag?" --provider ollama
 
 # Interactive, streaming, multi-turn chat (ollama only, for now)
-cargo run -- chat --provider ollama
+bb_rag chat --provider ollama
 ```
 
 `chat` opens a REPL: each turn re-runs retrieval, always prints the sources

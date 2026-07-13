@@ -1,5 +1,7 @@
 # bb_rag
 
+[![CI](https://github.com/poglesbyg/bb_rag/actions/workflows/test.yml/badge.svg)](https://github.com/poglesbyg/bb_rag/actions/workflows/test.yml)
+
 A bare-bones RAG (retrieval-augmented generation) CLI in Rust. No vector DB,
 no framework — just chunking, pluggable embeddings/generation, and cosine
 similarity.

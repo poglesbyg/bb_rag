@@ -86,13 +86,16 @@ cosine similarity; otherwise it falls back to in-process TF-IDF. You can't
 mix two different real-embedding providers in one index (e.g. `ollama` then
 `huggingface`) — delete `index.bin` and re-ingest to switch.
 
-Model names are configurable via env vars, defaulting to:
+Model names (and API base URLs, mainly useful for pointing at a proxy or a
+test double) are configurable via env vars, defaulting to:
 
 - `OLLAMA_HOST` — `http://localhost:11434`
 - `OLLAMA_EMBED_MODEL` — `nomic-embed-text`
 - `OLLAMA_GEN_MODEL` — `llama3.2`
+- `HF_API_BASE` — `https://api-inference.huggingface.co`
 - `HF_EMBED_MODEL` — `sentence-transformers/all-MiniLM-L6-v2`
 - `HF_GEN_MODEL` — `HuggingFaceH4/zephyr-7b-beta`
+- `ANTHROPIC_API_BASE` — `https://api.anthropic.com`
 
 HF's free Inference API only serves a subset of models at any given time —
 if the default 404s, pick another model from the HF Hub and override
@@ -129,3 +132,16 @@ if the default 404s, pick another model from the HF Hub and override
   embedding vectors, at the cost of not being human-readable. It's not a
   format you should expect to stay compatible across bb_rag versions; if
   loading ever fails after an update, delete it and re-ingest.
+
+## Testing
+
+`cargo test` runs everything, including the HTTP-calling functions
+(`ollama_embed`/`ollama_generate`/`ollama_chat_stream`, `claude_generate`,
+`hf_embed`/`hf_generate`) — those are exercised against a local
+[wiremock](https://docs.rs/wiremock) server rather than the real APIs, by
+pointing `OLLAMA_HOST`/`ANTHROPIC_API_BASE`/`HF_API_BASE` at it for the
+duration of each test. Those tests are `#[serial]` (via
+[serial_test](https://docs.rs/serial_test)) since env vars are
+process-global — they'd otherwise race with each other under `cargo test`'s
+default parallelism. No network access or real API keys are needed to run
+the suite.

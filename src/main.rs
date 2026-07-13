@@ -596,6 +596,10 @@ struct ContentBlock {
     text: String,
 }
 
+fn anthropic_base() -> String {
+    env::var("ANTHROPIC_API_BASE").unwrap_or_else(|_| "https://api.anthropic.com".to_string())
+}
+
 async fn claude_generate(client: &reqwest::Client, question: &str, context: &str) -> Result<String> {
     let api_key = env::var("ANTHROPIC_API_KEY").context("set ANTHROPIC_API_KEY")?;
     let user = format!("Context:\n{}\n\nQuestion: {}", context, question);
@@ -608,7 +612,7 @@ async fn claude_generate(client: &reqwest::Client, question: &str, context: &str
     };
 
     let resp = client
-        .post("https://api.anthropic.com/v1/messages")
+        .post(format!("{}/v1/messages", anthropic_base()))
         .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
         .json(&body)
@@ -792,9 +796,13 @@ fn hf_token() -> Result<String> {
     env::var("HF_API_TOKEN").context("set HF_API_TOKEN")
 }
 
+fn hf_base() -> String {
+    env::var("HF_API_BASE").unwrap_or_else(|_| "https://api-inference.huggingface.co".to_string())
+}
+
 async fn hf_embed(client: &reqwest::Client, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     let token = hf_token()?;
-    let url = format!("https://api-inference.huggingface.co/models/{}", hf_embed_model());
+    let url = format!("{}/models/{}", hf_base(), hf_embed_model());
     let resp = client
         .post(&url)
         .bearer_auth(token)
@@ -818,7 +826,7 @@ struct HfGenerationItem {
 
 async fn hf_generate(client: &reqwest::Client, question: &str, context: &str) -> Result<String> {
     let token = hf_token()?;
-    let url = format!("https://api-inference.huggingface.co/models/{}", hf_gen_model());
+    let url = format!("{}/models/{}", hf_base(), hf_gen_model());
     let prompt = format!(
         "{}\n\nContext:\n{}\n\nQuestion: {}\n\nAnswer:",
         SYSTEM_PROMPT, context, question
@@ -851,6 +859,38 @@ fn save_index(index: &Index, path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// RAII guard that sets an env var for the duration of a test and
+    /// restores whatever was there before on drop. Tests using this must be
+    /// `#[serial]` since env vars are process-global.
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            unsafe {
+                env::set_var(key, value);
+            }
+            EnvGuard { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous {
+                    Some(v) => env::set_var(self.key, v),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     /// Builds a minimal single-page PDF containing "Hello PDF world", with
     /// correctly computed xref byte offsets (pdf-extract doesn't recover from
@@ -1283,5 +1323,200 @@ mod tests {
     fn load_index_missing_file_errs() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_index(&dir.path().join("nope.bin")).is_err());
+    }
+
+    // ---------- network calls (mocked with wiremock) ----------
+
+    #[tokio::test]
+    #[serial]
+    async fn ollama_embed_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+            })))
+            .mount(&server)
+            .await;
+        let _host = EnvGuard::set("OLLAMA_HOST", &server.uri());
+
+        let client = reqwest::Client::new();
+        let result = ollama_embed(&client, &["a".to_string(), "b".to_string()]).await.unwrap();
+
+        assert_eq!(result, vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ollama_embed_propagates_error_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("model not found"))
+            .mount(&server)
+            .await;
+        let _host = EnvGuard::set("OLLAMA_HOST", &server.uri());
+
+        let client = reqwest::Client::new();
+        let err = ollama_embed(&client, &["a".to_string()]).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("model not found"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ollama_generate_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "response": "the mocked answer"
+            })))
+            .mount(&server)
+            .await;
+        let _host = EnvGuard::set("OLLAMA_HOST", &server.uri());
+
+        let client = reqwest::Client::new();
+        let answer = ollama_generate(&client, "question", "context").await.unwrap();
+
+        assert_eq!(answer, "the mocked answer");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ollama_chat_stream_accumulates_ndjson_chunks() {
+        let server = MockServer::start().await;
+        let ndjson = concat!(
+            r#"{"message":{"role":"assistant","content":"Hello"},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":", world"},"done":false}"#,
+            "\n",
+            r#"{"message":{"role":"assistant","content":""},"done":true}"#,
+            "\n",
+        );
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(ndjson.as_bytes().to_vec(), "application/x-ndjson"),
+            )
+            .mount(&server)
+            .await;
+        let _host = EnvGuard::set("OLLAMA_HOST", &server.uri());
+
+        let client = reqwest::Client::new();
+        let answer = ollama_chat_stream(&client, &[], "question").await.unwrap();
+
+        assert_eq!(answer, "Hello, world");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_generate_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": [{"type": "text", "text": "the mocked claude answer"}]
+            })))
+            .mount(&server)
+            .await;
+        let _base = EnvGuard::set("ANTHROPIC_API_BASE", &server.uri());
+        let _key = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let client = reqwest::Client::new();
+        let answer = claude_generate(&client, "question", "context").await.unwrap();
+
+        assert_eq!(answer, "the mocked claude answer");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_generate_propagates_error_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": {"message": "invalid x-api-key"}
+            })))
+            .mount(&server)
+            .await;
+        let _base = EnvGuard::set("ANTHROPIC_API_BASE", &server.uri());
+        let _key = EnvGuard::set("ANTHROPIC_API_KEY", "sk-ant-test");
+
+        let client = reqwest::Client::new();
+        let err = claude_generate(&client, "question", "context").await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("401"), "got: {err:#}");
+        assert!(format!("{err:#}").contains("invalid x-api-key"), "got: {err:#}");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hf_embed_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/test-embed-model"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([[0.7, 0.8]])))
+            .mount(&server)
+            .await;
+        let _base = EnvGuard::set("HF_API_BASE", &server.uri());
+        let _model = EnvGuard::set("HF_EMBED_MODEL", "test-embed-model");
+        let _token = EnvGuard::set("HF_API_TOKEN", "hf-test-token");
+
+        let client = reqwest::Client::new();
+        let result = hf_embed(&client, &["a".to_string()]).await.unwrap();
+
+        assert_eq!(result, vec![vec![0.7, 0.8]]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn hf_generate_parses_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/models/test-gen-model"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"generated_text": "the mocked hf answer"}
+            ])))
+            .mount(&server)
+            .await;
+        let _base = EnvGuard::set("HF_API_BASE", &server.uri());
+        let _model = EnvGuard::set("HF_GEN_MODEL", "test-gen-model");
+        let _token = EnvGuard::set("HF_API_TOKEN", "hf-test-token");
+
+        let client = reqwest::Client::new();
+        let answer = hf_generate(&client, "question", "context").await.unwrap();
+
+        assert_eq!(answer, "the mocked hf answer");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn retrieve_uses_mocked_embeddings_for_dense_ranking() {
+        let server = MockServer::start().await;
+        // question embeds to [1.0, 0.0]; "close" chunk should win over "far"
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "embeddings": [[1.0, 0.0]]
+            })))
+            .mount(&server)
+            .await;
+        let _host = EnvGuard::set("OLLAMA_HOST", &server.uri());
+
+        let index = Index {
+            embedding_provider: Some("ollama".to_string()),
+            chunks: vec![
+                Chunk { source: "far.txt".into(), text: "far".into(), embedding: Some(vec![0.0, 1.0]) },
+                Chunk { source: "close.txt".into(), text: "close".into(), embedding: Some(vec![0.9, 0.1]) },
+            ],
+        };
+
+        let client = reqwest::Client::new();
+        let top = retrieve(&client, &index, "question").await.unwrap();
+
+        assert_eq!(top[0].1.source, "close.txt");
+        assert!(top[0].0 > top[1].0);
     }
 }
